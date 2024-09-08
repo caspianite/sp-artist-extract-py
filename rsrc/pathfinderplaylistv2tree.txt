@@ -1,0 +1,85 @@
+data
+├── playlistV2
+    ├── __typename
+    ├── content
+    │   ├── __typename
+    │   ├── items
+    │   │   ├── []
+    │   │   │   ├── addedAt
+    │   │   │   │   └── isoString
+    │   │   │   ├── addedBy
+    │   │   │   │   ├── data
+    │   │   │   │   │   ├── __typename
+    │   │   │   │   │   ├── avatar
+    │   │   │   │   │   │   └── sources
+    │   │   │   │   │   │       ├── []
+    │   │   │   │   │   ├── name
+    │   │   │   │   │   ├── uri
+    │   │   │   │   │   ├── username
+    │   │   │   ├── attributes
+    │   │   │   ├── itemV2
+    │   │   │   │   ├── __typename
+    │   │   │   │   ├── data
+    │   │   │   │   │   ├── __typename
+    │   │   │   │   │   ├── albumOfTrack
+    │   │   │   │   │   │   ├── artists
+    │   │   │   │   │   │   │   └── items
+    │   │   │   │   │   │   │       ├── []
+    │   │   │   │   │   │   ├── coverArt
+    │   │   │   │   │   │   │   └── sources
+    │   │   │   │   │   │   │       ├── []
+    │   │   │   │   │   │   ├── name
+    │   │   │   │   │   │   ├── uri
+    │   │   │   │   │   ├── artists
+    │   │   │   │   │   │   └── items
+    │   │   │   │   │   │       ├── []
+    │   │   │   │   │   ├── associations
+    │   │   │   │   │   │   ├── associatedVideos
+    │   │   │   │   │   │   │   └── totalCount
+    │   │   │   │   │   ├── contentRating
+    │   │   │   │   │   │   ├── label
+    │   │   │   │   │   ├── discNumber
+    │   │   │   │   │   ├── trackDuration
+    │   │   │   │   │   │   ├── totalMilliseconds
+    │   │   │   │   │   ├── name
+    │   │   │   │   │   ├── playability
+    │   │   │   │   │   │   ├── playable
+    │   │   │   │   │   │   ├── reason
+    │   │   │   │   │   ├── playcount
+    │   │   │   │   │   ├── trackNumber
+    │   │   │   │   │   ├── uri
+    │   │   │   ├── uid
+    │   ├── pagingInfo
+    │   │   ├── limit
+    │   │   ├── offset
+    │   ├── totalCount
+    ├── attributes
+    ├── basePermission
+    ├── description
+    ├── followers
+    ├── following
+    ├── format
+    ├── images
+    │   ├── items
+    │       ├── []
+    │           ├── extractedColors
+    │           │   ├── colorRaw
+    │           │       ├── hex
+    │           │       ├── isFallback
+    │           ├── sources
+    │               ├── []
+    ├── name
+    ├── ownerV2
+    │   ├── data
+    │       ├── __typename
+    │       ├── avatar
+    │           └── sources
+    │               ├── []
+    │       ├── name
+    │       ├── uri
+    │       ├── username
+    ├── revisionId
+    ├── sharingInfo
+    │   ├── shareUrl
+    ├── uri
+extensions

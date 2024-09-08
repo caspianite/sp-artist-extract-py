@@ -1,3 +1,4 @@
+import json
 import os
 import random
 import re
@@ -41,8 +42,8 @@ class UserClient():
             }
 
             # Add proxy if provided
-            if proxy_url:
-                request_options["proxies"] = {"http://": proxy_url, "https://": proxy_url}
+            #if proxy_url:
+            #    request_options["proxies"] = {"http://": proxy_url, "https://": proxy_url}
 
             # Make the HTTP GET request to fetch the playlist page
             response = httpx.get(
@@ -111,8 +112,6 @@ class UserClient():
             raise ValueError("Invalid client token")
 
 
-        if params is not None and isinstance(params, dict):
-            params = {k: str(v) for k, v in params.items()}  # Convert all param values to strings
 
 
         # Determine if it's a mobile or spclient request
@@ -135,8 +134,53 @@ class UserClient():
         except Exception as err:
             print(f"Error in sync_get: {err}")
             raise
+    
+    def process_artist_pathfinder(self, artist_key: str):
+        pathfinder_json = self.get_API(url="https://api-partner.spotify.com/pathfinder/v1/query", params={
+                "operationName": "queryArtistOverview",
+                "variables": {
+                    "uri": f"spotify:artist:{artist_key}",
+                    "locale": "intl-us",
+                    "includePrerelease": True
+                },
+                "extensions": {
+                    "persistedQuery": {
+                        "version": 1,
+                        "sha256Hash": "7c5a08a226e4dc96387c0c0a5ef4bd1d2e2d95c88cbb33dcfa505928591de672"
+                    }
+                }
+        })
+
+        artistsUnion = pathfinder_json["data"]["artistsUnion"]
+        profile = artistsUnion["profile"]
+        stats = artistsUnion["stats"]
+        discography = artistsUnion["discography"]
+        goods = artistsUnion["goods"]
+        relatedcontent = artistsUnion["relatedContent"]
+        relatedvideos = artistsUnion["relatedVideos"]
+        relatedartists = artistsUnion["relatedArtists"]
+        if self.database.insert_artist_information(artist_key, pathfinder_json):
+            self.database.insert_artist_json(artist_key=artist_key, artist_data_json={"name": profile["name"]})
+
+        self.database.insert_artist_pathfinder_over_time(artist_key, stats, profile, goods, relatedcontent, relatedartists, discography, relatedvideos)
+
+    
+    def process_artist_relations(self, artist_key: str, relatedartists: dict, spider_pathfinder_recursion: bool):
+        related_artist_keys = [artist['id'] for artist in relatedartists['items']]
+
+        if not self.database.find_relation_with_exact_artist_keys(artist_key, related_artist_keys):
+            self.database.insert_artist_relations(artist_key, related_artist_keys)
+        
+        if spider_pathfinder_recursion:
+            for key in related_artist_keys:
+                if not self.database.artist_key_exists(key):
+                    self.process_artist_pathfinder(key)
 
 
+
+
+        
+    
     def fetch_artist_performance_information(self, artist_key: str):
         """Scrape artist data and insert performance data into the database."""
         print("Scrape Time started")
@@ -205,14 +249,13 @@ class UserClient():
             }
 
             # Fetch a proxy URL from the database
-            proxy_url = random.choice(self.database.proxies)
+            #proxy_url = random.choice(self.database.proxies)
 
             # Make the POST request
             response = self.http_client.post(
                 "https://clienttoken.spotify.com/v1/clienttoken",
                 json=body,
-                headers=headers,
-                proxies={"http://": proxy_url, "https://": proxy_url}
+                headers=headers
             )
 
             # Raise an exception for non-200 status codes
@@ -234,6 +277,6 @@ class UserClient():
             print(f"Error producing client token: {err}")
 
     def refresh_client_token(self):
-        if self.requests_sent % 500:
+        if self.requests_sent % 500 == 0:
             self.produce_client_token()
 
