@@ -14,9 +14,10 @@ import json
 
 class DatabaseHandler:
     def __init__(self) -> None:
-        self.conn = psycopg2.connect(settings.postgres_conn_string) # dangerous
+        self.conn = psycopg2.connect(settings.postgres_conn_string, sslmode='require') # dangerous
         self.cursor = self.conn.cursor(cursor_factory = psycopg2.extras.RealDictCursor)
         self.proxies = self.fetch_all_proxy_urls()
+        print(self.proxies)
 
     def escape_unicode(self, text):
         # This function will escape non-ASCII characters into their Unicode equivalents
@@ -28,15 +29,15 @@ class DatabaseHandler:
 
 
     def fetch_all_proxy_urls(self):
-        
         """Fetch all proxy URLs from the proxies_urls table."""
+        #return ["http://127.0.0.1:62000"]
         print("fetching proxies")
-
-        if settings.debug_mode:
-            print("using proxy ", [settings.debug_proxy])
-            return [settings.debug_proxy]
-
         try:
+            print(settings.debug_mode)
+            if settings.debug_mode:
+                print("using proxy ", [settings.debug_proxy])
+                return [settings.debug_proxy]
+
             self.cursor.execute("SELECT url FROM proxies_urls")
             rows = self.cursor.fetchall()  # Fetches all rows from the query result
             print(rows)
@@ -108,7 +109,7 @@ class DatabaseHandler:
     
     def insert_artist_pathfinder_over_time(self, artist_key, stats, profile, goods, relatedcontent, relatedartists, discography, relatedvideos):
         query = """
-        INSERT INTO artist_table (
+        INSERT INTO artist_pathfinder_over_time (
             artist_key, 
             stats, 
             profile, 
@@ -141,12 +142,12 @@ class DatabaseHandler:
                 json.dumps(discography), 
                 json.dumps(relatedvideos)
             ))
-            self.connection.commit()
+            self.conn.commit()
             print("Artist data inserted successfully")
 
         except Exception as e:
             print("Failed to insert artist data", e)
-            self.connection.rollback()
+            self.conn.rollback()
 
     def insert_artist_json(self, artist_key, artist_data_json):
         # Query excluding artist_entry_id and scraped_at, which have default values
@@ -168,13 +169,13 @@ class DatabaseHandler:
                 json.dumps(artist_data_json)  # Convert the data to JSON string format
             ))
             # Commit the transaction
-            self.connection.commit()
+            self.conn.commit()
             print("Artist JSON data inserted successfully")
 
         except Exception as e:
             print("Failed to insert artist JSON data:", e)
             # Rollback the transaction in case of error
-            self.connection.rollback()
+            self.conn.rollback()
 
     def insert_artist_relations(self, artist_key, relates_to_artist_keys: list[str]):
         # Query excluding scraped_at, which has a default value
@@ -202,13 +203,13 @@ class DatabaseHandler:
                 ))
 
             # Commit the transaction after inserting all rows
-            self.connection.commit()
+            self.conn.commit()
             print(f"Inserted {len(relates_to_artist_keys)} artist relations data rows successfully")
 
         except Exception as e:
             print("Failed to insert artist relations data:", e)
             # Rollback the transaction in case of error
-            self.connection.rollback()
+            self.conn.rollback()
 
     def find_relation_with_exact_artist_keys(self, artist_key: str, related_artist_keys: list[str]):
         """
@@ -310,9 +311,12 @@ class RedisDatabaseHandler:
         try:
             key = self.client.randomkey()
             if key:
+                # Decode key and value from bytes to strings
                 value = self.client.get(key)
-                print(f"Random Key fetched: {key} with value: {value}")
-                return {"key": key, "value": value}
+                key_str = key.decode('utf-8') if isinstance(key, bytes) else key
+                value_str = value.decode('utf-8') if isinstance(value, bytes) else value
+                print(f"Random Key fetched: {key_str} with value: {value_str}")
+                return {"key": key_str, "value": value_str}
             else:
                 print("No keys found in Redis.")
                 return None

@@ -6,14 +6,89 @@ import string
 import time
 import database
 from settings import settings
-import httpx
+import httpx, urllib
 class UserClient():
     def __init__(self, database: database.DatabaseHandler, redis: database.RedisDatabaseHandler) -> None:
         self.database = database
-        self.http_client = httpx.Client(http2=True, follow_redirects=True, verify=False, proxy=None if settings.skip_proxy else random.choice(self.database.proxies))
+        self.http_client = httpx.Client(http2=True, follow_redirects=True, verify=False, proxy=random.choice(self.database.proxies))
         self.redis = redis
         self.requests_sent = 0
         self.bearer_token = self.fetch_bearer_token()
+    
+    def convert_bools_for_encoding(self, d):
+        if isinstance(d, dict):
+            return {k: self.convert_bools_for_encoding(v) for k, v in d.items()}
+        elif isinstance(d, list):
+            return [self.convert_bools_for_encoding(v) for v in d]
+        elif isinstance(d, bool):
+            # Return actual booleans as true or false, not as strings
+            return d
+        else:
+            return d
+
+    def dict_to_query_string(self, d, use_double_quotes=True):
+        """
+        Converts a dictionary to a query string, ensuring boolean values are not quoted.
+        """
+        items = []
+        for k, v in d.items():
+            if isinstance(v, dict):
+                v = str(v).replace("'", '"') if use_double_quotes else str(v)
+            elif isinstance(v, bool):
+                v = 'true' if v else 'false'
+            items.append(f"{k}={urllib.parse.quote(str(v))}")
+        return '&'.join(items)
+
+    def dict_to_json_query_string(self, params: dict) -> str:
+        """
+        Converts a dictionary to a JSON-like query string and URL-encodes it.
+
+        Args:
+        - params (dict): The dictionary to convert.
+
+        Returns:
+        - str: The JSON-encoded query string.
+        """
+        # Convert the dictionary to a JSON string
+        json_string = json.dumps(params, separators=(',', ':'))
+
+        # URL-encode the JSON string
+        encoded_string = urllib.parse.quote(json_string)
+
+        return encoded_string
+
+
+
+    def encode_query_string(self, params: dict, operation_name: str, use_double_quotes: bool = True) -> str:
+        """
+        Encodes a single dictionary containing 'variables' and 'extensions' into a URL query string 
+        with the option to use double quotes (%22) or single quotes (%27). Allows for custom operation names,
+        and ensures booleans are represented as true or false (without quotes) in the query string.
+
+        Args:
+        - params (dict): A dictionary containing 'variables' and 'extensions' as keys.
+        - operation_name (str): The operation name to be included in the query string.
+        - use_double_quotes (bool): If True, use double quotes (%22), else use single quotes (%27).
+
+        Returns:
+        - str: The encoded query string.
+        """
+        # Convert booleans and prepare params for encoding
+        params_for_encoding = self.convert_bools_for_encoding(params)
+
+        # Extract 'variables' and 'extensions' from the provided params dictionary
+        variables = params_for_encoding.get('variables', {})
+        extensions = params_for_encoding.get('extensions', {})
+
+        # Encode the variables and extensions using the helper function
+        variables_encoded = self.dict_to_query_string(variables, use_double_quotes)
+        extensions_encoded = self.dict_to_query_string(extensions, use_double_quotes)
+
+        # Construct the final query string
+        query_string = f"operationName={operation_name}&variables={urllib.parse.quote(variables_encoded)}&extensions={urllib.parse.quote(extensions_encoded)}"
+
+        return query_string
+
     def generate_random_string(self, length=32):
         """Generate a random alphanumeric string of lowercase letters of a given length."""
         return ''.join(random.choices(string.ascii_lowercase + string.digits, k=length))
@@ -81,6 +156,7 @@ class UserClient():
 
         # Common headers for both mobile and web clients
         common_headers = {
+            "user-agent": 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:130.0) Gecko/20100101 Firefox/130.0',
             "accept": "application/json",
             "accept-encoding": "gzip, deflate, br, zstd",
             "content-type": "application/json;charset=UTF-8",
@@ -136,8 +212,8 @@ class UserClient():
             raise
     
     def process_artist_pathfinder(self, artist_key: str):
-        pathfinder_json = self.get_API(url="https://api-partner.spotify.com/pathfinder/v1/query", params={
-                "operationName": "queryArtistOverview",
+        params = {
+            "operationName": "queryArtistOverview",
                 "variables": {
                     "uri": f"spotify:artist:{artist_key}",
                     "locale": "intl-us",
@@ -146,25 +222,34 @@ class UserClient():
                 "extensions": {
                     "persistedQuery": {
                         "version": 1,
-                        "sha256Hash": "7c5a08a226e4dc96387c0c0a5ef4bd1d2e2d95c88cbb33dcfa505928591de672"
+                        "sha256Hash": "da986392124383827dc03cbb3d66c1de81225244b6e20f8d78f9f802cc43df6e"
                     }
                 }
-        })
+        }
 
-        artistsUnion = pathfinder_json["data"]["artistsUnion"]
-        profile = artistsUnion["profile"]
-        stats = artistsUnion["stats"]
-        discography = artistsUnion["discography"]
-        goods = artistsUnion["goods"]
-        relatedcontent = artistsUnion["relatedContent"]
-        relatedvideos = artistsUnion["relatedVideos"]
-        relatedartists = artistsUnion["relatedArtists"]
+
+        # Convert variables and extensions to JSON and URL-encode them
+        operation_name = params['operationName']
+        variables_encoded = urllib.parse.quote(json.dumps(params['variables']))
+        extensions_encoded = urllib.parse.quote(json.dumps(params['extensions']))
+
+        pathfinder_json = self.get_API(url=f"https://api-partner.spotify.com/pathfinder/v1/query?operationName={operation_name}&variables={variables_encoded}&extensions={extensions_encoded}", params=None)
+
+        artistUnion = pathfinder_json["data"]["artistUnion"]
+        print(artistUnion)
+        profile = artistUnion["profile"]
+        stats = artistUnion["stats"]
+        discography = artistUnion["discography"]
+        goods = artistUnion["goods"]
+        relatedcontent = artistUnion["relatedContent"]
+        relatedvideos = artistUnion["relatedVideos"]
+        relatedartists = relatedcontent["relatedArtists"]
         if self.database.insert_artist_information(artist_key, pathfinder_json):
             self.database.insert_artist_json(artist_key=artist_key, artist_data_json={"name": profile["name"]})
 
         self.database.insert_artist_pathfinder_over_time(artist_key, stats, profile, goods, relatedcontent, relatedartists, discography, relatedvideos)
+        self.process_artist_relations(artist_key, relatedartists, True)
 
-    
     def process_artist_relations(self, artist_key: str, relatedartists: dict, spider_pathfinder_recursion: bool):
         related_artist_keys = [artist['id'] for artist in relatedartists['items']]
 
@@ -175,6 +260,8 @@ class UserClient():
             for key in related_artist_keys:
                 if not self.database.artist_key_exists(key):
                     self.process_artist_pathfinder(key)
+
+
 
 
 

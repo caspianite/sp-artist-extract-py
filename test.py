@@ -11,7 +11,7 @@ class TestConsumer:
         self.redis = redis
         self.user_client = UserClient(database, redis)
         self.stop = False
-        self.user_client.process_artist_pathfinder("3ymZrzITYC3wn283aZ95xq")
+        self.user_client.process_artist_pathfinder("5ZTKDjtRclyhO4UW8vV6fN")
 
 
 
