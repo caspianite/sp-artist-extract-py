@@ -1,16 +1,14 @@
 import datetime
 import json
-import os
 import random
 import re
 import string
 import time
-
 import pika.connection
 import database
 from settings import settings
 import httpx, urllib
-import threading, pika
+import pika
 
 class UserClient():
     def __init__(self, database: database.DatabaseHandler, redis: database.RedisDatabaseHandler, rabbitmqConnection: pika.BlockingConnection) -> None:
@@ -22,6 +20,19 @@ class UserClient():
         self.connection = rabbitmqConnection
         self.artist_indexing_channel = None
         self.init_lateral_channels()
+        self.mq_artists_sent = []
+        self.mq_artists_sent_last_cleared = datetime.datetime.now()
+
+    def send_artist_for_index(self, artist_key):
+        time_since_last_cleared = datetime.datetime.now() - self.mq_artists_sent_last_cleared
+        if time_since_last_cleared.total_seconds() > 120:  # 5 minutes = 300 seconds
+            self.mq_artists_sent.clear()
+            self.mq_artists_sent_last_cleared = datetime.datetime.now()
+
+        if artist_key not in self.mq_artists_sent:
+
+            self.mq_publish_message(self.artist_indexing_channel, 'sp_artist_pathfinder_index', artist_key)
+            self.mq_artists_sent.append(artist_key)
 
     def convert_to_unix_timestamp(self, date_pathfinder_dict: dict):
         # Extract day, month, and year from the input date
@@ -235,54 +246,59 @@ class UserClient():
             raise
     
     def process_artist_pathfinder(self, artist_key: str):
-        params = {
-            "operationName": "queryArtistOverview",
-                "variables": {
-                    "uri": f"spotify:artist:{artist_key}",
-                    "locale": "intl-us",
-                    "includePrerelease": True
-                },
-                "extensions": {
-                    "persistedQuery": {
-                        "version": 1,
-                        "sha256Hash": "da986392124383827dc03cbb3d66c1de81225244b6e20f8d78f9f802cc43df6e"
-                    }
-                }
-        }
-
-
-        # Convert variables and extensions to JSON and URL-encode them
-        operation_name = params['operationName']
-        variables_encoded = urllib.parse.quote(json.dumps(params['variables']))
-        extensions_encoded = urllib.parse.quote(json.dumps(params['extensions']))
-
-        pathfinder_json = self.get_API(url=f"https://api-partner.spotify.com/pathfinder/v1/query?operationName={operation_name}&variables={variables_encoded}&extensions={extensions_encoded}", params=None)
-        #print(pathfinder_json)
-
-        artistUnion = pathfinder_json["data"]["artistUnion"]
-        #print(artistUnion)
-        profile = artistUnion["profile"]
-        stats = artistUnion["stats"]
-        discography = artistUnion["discography"]
-        goods = artistUnion["goods"]
-        relatedcontent = artistUnion["relatedContent"]
-        relatedvideos = artistUnion["relatedVideos"]
-        relatedartists = relatedcontent["relatedArtists"]
-        self.database.insert_artist_pathfinder_over_time(artist_key, stats, profile, goods, relatedcontent, relatedartists, discography, relatedvideos)
-        related_artist_keys = [artist['id'] for artist in relatedartists['items']]
-        self.process_artist_relations(artist_key, relatedartists)
-        for key in related_artist_keys:
-            self.mq_publish_message(self.artist_indexing_channel, 'sp_artist_pathfinder_index', key)
         try:
-            if not self.database.artist_key_exists(artist_key):
 
-                artist_entry = self.database.insert_artist_json(artist_key=artist_key, artist_data_json={"name": profile["name"]})
-                if artist_entry:
-                    self.database.insert_artist_information(artist_key, pathfinder_json, artist_entry)
-        except:
-            pass
-        self.process_discography_items(artist_key, discography)
-            
+            params = {
+                "operationName": "queryArtistOverview",
+                    "variables": {
+                        "uri": f"spotify:artist:{artist_key}",
+                        "locale": "intl-us",
+                        "includePrerelease": True
+                    },
+                    "extensions": {
+                        "persistedQuery": {
+                            "version": 1,
+                            "sha256Hash": "da986392124383827dc03cbb3d66c1de81225244b6e20f8d78f9f802cc43df6e"
+                        }
+                    }
+            }
+
+
+            # Convert variables and extensions to JSON and URL-encode them
+            operation_name = params['operationName']
+            variables_encoded = urllib.parse.quote(json.dumps(params['variables']))
+            extensions_encoded = urllib.parse.quote(json.dumps(params['extensions']))
+
+            pathfinder_json = self.get_API(url=f"https://api-partner.spotify.com/pathfinder/v1/query?operationName={operation_name}&variables={variables_encoded}&extensions={extensions_encoded}", params=None)
+            #print(pathfinder_json)
+
+            artistUnion = pathfinder_json["data"]["artistUnion"]
+            #print(artistUnion)
+            profile = artistUnion["profile"]
+            stats = artistUnion["stats"]
+            discography = artistUnion["discography"]
+            goods = artistUnion["goods"]
+            relatedcontent = artistUnion["relatedContent"]
+            relatedvideos = artistUnion["relatedVideos"]
+            relatedartists = relatedcontent["relatedArtists"]
+            self.database.insert_artist_pathfinder_over_time(artist_key, stats, profile, goods, relatedcontent, relatedartists, discography, relatedvideos)
+            related_artist_keys = [artist['id'] for artist in relatedartists['items']]
+            self.process_artist_relations(artist_key, relatedartists)
+            for key in related_artist_keys:
+                self.send_artist_for_index(key)
+            try:
+                if not self.database.artist_key_exists(artist_key):
+
+                    artist_entry = self.database.insert_artist_json(artist_key=artist_key, artist_data_json={"name": profile["name"]})
+                    if artist_entry:
+                        self.database.insert_artist_information(artist_key, pathfinder_json, artist_entry)
+            except:
+                pass
+            self.process_discography_items(artist_key, discography)
+            return True
+        except Exception as err:
+            print(err)
+            return False
 
 
     def process_artist_relations(self, artist_key: str, relatedartists: dict):
