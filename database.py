@@ -1,3 +1,4 @@
+import datetime
 import os
 import random
 import string
@@ -78,24 +79,26 @@ class DatabaseHandler:
             print(f"Query: {query}")
             self.conn.rollback()  # Rollback in case of error
     
-    def insert_artist_information(self, artist_key: str, artist_pathfinder_json: dict):
+    def insert_artist_information(self, artist_key: str, artist_pathfinder_json: dict, entry_id: int):
         # Base query
         query = """
             INSERT INTO artist_information (artist_key, artist_pathfinder_json)
-            VALUES (%s, %s)
+            VALUES (%s, %s, %s) RETURNING *;
         """
 
         # Prepare values
         values = [
             artist_key,
             self.escape_unicode(json.dumps(artist_pathfinder_json)),
+            entry_id
         ]
 
         try:
             # Execute the query
-            self.client.execute(query, values)
+            self.cursor.execute(query, values)
+
             # Commit the transaction
-            self.client.commit()
+            self.conn.commit()
             print('ArtistInformationInput inserted and transaction committed')
             return True
         except Exception as err:
@@ -160,6 +163,7 @@ class DatabaseHandler:
             %s, 
             %s
         )
+        RETURNING *;
         """
 
         try:
@@ -170,12 +174,16 @@ class DatabaseHandler:
             ))
             # Commit the transaction
             self.conn.commit()
+            artist_entry_id = self.cursor.fetchone()[0]
+
             print("Artist JSON data inserted successfully")
+            return artist_entry_id
 
         except Exception as e:
             print("Failed to insert artist JSON data:", e)
             # Rollback the transaction in case of error
             self.conn.rollback()
+            return False
 
     def insert_artist_relations(self, artist_key, relates_to_artist_keys: list[str]):
         # Query excluding scraped_at, which has a default value
@@ -251,16 +259,125 @@ class DatabaseHandler:
             query = "SELECT EXISTS(SELECT 1 FROM artist_information WHERE artist_key = %s);"
             # Execute the query
             self.cursor.execute(query, (artist_key,))
-            # Fetch the result, which will be a boolean
-            result = self.cursor.fetchone()[0]
-            return result
+            # Fetch the result
+            result = self.cursor.fetchone()
+            if result and result['exists']:
+                return result['exists']
+            else:
+                return False
         except Exception as e:
             print(f"Error checking if artist_key exists: {e}")
             return False
 
 
+    def insert_album(self, album_data):
+        """
+        Inserts an album record into the albums table.
 
+        Required fields in album_data:
+        - time_release (str): A timestamp with time zone (e.g., '2021-03-19 10:00:00+00').
+        - album_key (str): A unique identifier for the album (primary key).
+        - artist_key (str): The artist's unique identifier.
+        - name (str): The name of the album.
+        - tracks_count (int): The number of tracks in the album.
+        - pathfinder_json (dict): A JSON object containing album metadata (e.g., genre, release type).
 
+        Optional fields:
+        - label (str or None): The record label name (can be NULL).
+        - scraped_at (str or None): A timestamp with time zone (if None, PostgreSQL's CURRENT_TIMESTAMP will be used).
+        
+        album_data: Dictionary containing the album details.
+        """
+        query = """
+            INSERT INTO albums (
+                time_release, 
+                album_key, 
+                artist_key, 
+                name, 
+                label, 
+                tracks_count, 
+                pathfinder_json, 
+                scraped_at
+            )
+            VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s
+            )
+            ON CONFLICT (album_key) DO NOTHING;
+        """
+
+        values = (
+            datetime.datetime.fromtimestamp(album_data['time_release'], tz=datetime.timezone.utc),  # Must be a valid timestamp with time zone
+            album_data['album_key'],      # Unique album key (non-nullable)
+            album_data['artist_key'],     # Artist key (non-nullable)
+            album_data['name'],           # Album name (non-nullable)
+            album_data.get('label', None),  # Optional, can be NULL
+            album_data['tracks_count'],   # Number of tracks (non-nullable)
+            json.dumps(album_data['pathfinder_json']),  # JSON object, stored as a string
+            album_data.get('scraped_at', datetime.datetime.now(tz=datetime.timezone.utc))  # Optional, can be NULL to use PostgreSQL's CURRENT_TIMESTAMP
+        )
+
+        try:
+            # Execute the insert query
+            self.cursor.execute(query, values)
+            self.conn.commit()  # Commit the transaction
+            print(f"Album inserted: {album_data['album_key']}")
+        except Exception as err:
+            print(f"Error executing insert query: {err}")
+            print(f"Data passed: {album_data}")
+            self.conn.rollback()  # Rollback in case of error
+
+    def insert_track(self, track_data):
+        """
+        Inserts a track record into the tracks table.
+
+        Required fields in track_data:
+        - track_key (str): A unique identifier for the track (primary key).
+        - album_key (str): The unique identifier for the associated album.
+        - name (str): The name of the track.
+        - playcount (int): The playcount of the track.
+        - artists (dict): A JSON object containing artist information (e.g., a list of artist names/IDs).
+        - content_rating (dict): A JSON object representing content ratings (e.g., explicit, clean).
+
+        Optional fields:
+        - scraped_at (str or None): A timestamp with time zone (if None, PostgreSQL's CURRENT_TIMESTAMP will be used).
+        
+        track_data: Dictionary containing the track details.
+        """
+        query = """
+            INSERT INTO tracks (
+                scraped_at, 
+                track_key, 
+                album_key, 
+                name, 
+                playcount, 
+                artists, 
+                content_rating
+            )
+            VALUES (
+                %s, %s, %s, %s, %s, %s, %s
+            )
+            ON CONFLICT (track_key) DO NOTHING;
+        """
+
+        values = (
+            track_data.get('scraped_at', datetime.datetime.now(tz=datetime.timezone.utc)),  # Optional, can be NULL to use PostgreSQL's CURRENT_TIMESTAMP
+            track_data['track_key'],             # Unique track key (non-nullable)
+            track_data['album_key'],             # Album key (non-nullable)
+            track_data['name'],                  # Track name (non-nullable)
+            track_data['playcount'],             # Playcount (non-nullable, bigint)
+            json.dumps(track_data['artists']),   # JSON object representing artists
+            json.dumps(track_data['content_rating'])  # JSON object representing content ratings
+        )
+
+        try:
+            # Execute the insert query
+            self.cursor.execute(query, values)
+            self.conn.commit()  # Commit the transaction
+            print(f"Track inserted: {track_data['track_key']}")
+        except Exception as err:
+            print(f"Error executing insert query: {err}")
+            print(f"Data passed: {track_data}")
+            self.conn.rollback()  # Rollback in case of error
 
     
 

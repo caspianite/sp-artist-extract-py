@@ -1,20 +1,43 @@
+import datetime
 import json
 import os
 import random
 import re
 import string
 import time
+
+import pika.connection
 import database
 from settings import settings
 import httpx, urllib
+import threading, pika
+
 class UserClient():
-    def __init__(self, database: database.DatabaseHandler, redis: database.RedisDatabaseHandler) -> None:
+    def __init__(self, database: database.DatabaseHandler, redis: database.RedisDatabaseHandler, rabbitmqConnection: pika.BlockingConnection) -> None:
         self.database = database
         self.http_client = httpx.Client(http2=True, follow_redirects=True, verify=False, proxy=random.choice(self.database.proxies))
         self.redis = redis
         self.requests_sent = 0
         self.bearer_token = self.fetch_bearer_token()
-    
+        self.connection = rabbitmqConnection
+        self.artist_indexing_channel = None
+        self.init_lateral_channels()
+
+    def convert_to_unix_timestamp(self, date_pathfinder_dict: dict):
+        # Extract day, month, and year from the input date
+        day = date_pathfinder_dict["day"]
+        month = date_pathfinder_dict["month"]
+        year = date_pathfinder_dict["year"]
+
+        # Create a datetime object (set time to 00:00:00 by default)
+        dt = datetime.datetime(year, month, day)
+
+        # Convert the datetime object to a Unix timestamp (seconds since epoch)
+        unix_timestamp = int(dt.replace(tzinfo=datetime.timezone.utc).timestamp())
+
+        return unix_timestamp
+
+
     def convert_bools_for_encoding(self, d):
         if isinstance(d, dict):
             return {k: self.convert_bools_for_encoding(v) for k, v in d.items()}
@@ -135,7 +158,7 @@ class UserClient():
 
             if bearer_token:
                 bearer = bearer_token.group(1)
-                print("Fetched bearer token:", bearer)
+                #print("Fetched bearer token:", bearer)
                 return bearer
             else:
                 raise ValueError("Bearer token not found in the page content.")
@@ -234,9 +257,10 @@ class UserClient():
         extensions_encoded = urllib.parse.quote(json.dumps(params['extensions']))
 
         pathfinder_json = self.get_API(url=f"https://api-partner.spotify.com/pathfinder/v1/query?operationName={operation_name}&variables={variables_encoded}&extensions={extensions_encoded}", params=None)
+        #print(pathfinder_json)
 
         artistUnion = pathfinder_json["data"]["artistUnion"]
-        print(artistUnion)
+        #print(artistUnion)
         profile = artistUnion["profile"]
         stats = artistUnion["stats"]
         discography = artistUnion["discography"]
@@ -244,22 +268,128 @@ class UserClient():
         relatedcontent = artistUnion["relatedContent"]
         relatedvideos = artistUnion["relatedVideos"]
         relatedartists = relatedcontent["relatedArtists"]
-        if self.database.insert_artist_information(artist_key, pathfinder_json):
-            self.database.insert_artist_json(artist_key=artist_key, artist_data_json={"name": profile["name"]})
-
         self.database.insert_artist_pathfinder_over_time(artist_key, stats, profile, goods, relatedcontent, relatedartists, discography, relatedvideos)
-        self.process_artist_relations(artist_key, relatedartists, True)
-
-    def process_artist_relations(self, artist_key: str, relatedartists: dict, spider_pathfinder_recursion: bool):
         related_artist_keys = [artist['id'] for artist in relatedartists['items']]
+        self.process_artist_relations(artist_key, relatedartists)
+        for key in related_artist_keys:
+            self.mq_publish_message(self.artist_indexing_channel, 'sp_artist_pathfinder_index', key)
+        try:
+            if not self.database.artist_key_exists(artist_key):
 
+                artist_entry = self.database.insert_artist_json(artist_key=artist_key, artist_data_json={"name": profile["name"]})
+                if artist_entry:
+                    self.database.insert_artist_information(artist_key, pathfinder_json, artist_entry)
+        except:
+            pass
+        self.process_discography_items(artist_key, discography)
+            
+
+
+    def process_artist_relations(self, artist_key: str, relatedartists: dict):
+        related_artist_keys = [artist['id'] for artist in relatedartists['items']]
+        print(related_artist_keys)
         if not self.database.find_relation_with_exact_artist_keys(artist_key, related_artist_keys):
             self.database.insert_artist_relations(artist_key, related_artist_keys)
+        else:
+            print("artist relations already existing")
         
-        if spider_pathfinder_recursion:
-            for key in related_artist_keys:
-                if not self.database.artist_key_exists(key):
-                    self.process_artist_pathfinder(key)
+    def process_album(self, artist_key: str, album: dict):
+        time_release = self.convert_to_unix_timestamp(album["date"])
+        name = album["name"]
+        label = album["label"]
+        artist_key = artist_key
+        album_key = album["id"]
+        tracks_count = album["tracks"]["totalCount"]
+
+        self.database.insert_album({
+            "time_release": time_release,
+            "album_key": album_key,
+            "artist_key": artist_key,
+            "name": name,
+            "tracks_count": tracks_count,
+            "pathfinder_json": album,
+            "label": label
+        })
+
+    def process_track(self, artist_key: str, track: dict): #track is case sens
+        if track.get("uid"):
+            track = track["track"]
+        track_key = track["id"]
+        name = track["name"]
+        artists = track["artists"]["items"]
+        duration = track["duration"]["totalMilliseconds"]
+        playcount = int(track["playcount"])
+        album_key = track["albumOfTrack"]["uri"].split(":album:")[1]
+        content_rating = track["contentRating"]
+
+        self.database.insert_track({
+            "track_key": track_key, "album_key": album_key, "name": name, "playcount": playcount,
+            "artists": artists, "content_rating": content_rating
+        })
+
+        for artist in artists:
+            self.mq_publish_message(self.artist_indexing_channel, 'sp_artist_pathfinder_index', artist["uri"].split(":artist:")[1])
+
+        
+
+    def process_discography_items(self, artist_key: str, discography: dict):
+        processed_ids = []
+        albums = discography["albums"]
+
+        # Process albums
+        if albums["totalCount"] > 0:
+            for album in albums["items"]:
+                releases = album["releases"]["items"]
+                for release in releases:
+                    # Check if it is an album and if the ID is not already processed
+                    if "album" in release["uri"] and release["uri"].split(":")[-1] not in processed_ids:
+                        self.process_album(artist_key, release)
+                        processed_ids.append(release["id"])
+
+        # Process singles
+        singles = discography["singles"]
+        if singles["totalCount"] > 0:
+            for single in singles["items"]:
+                releases = single["releases"]["items"]
+                for release in releases:
+                    # Process albums in singles
+                    if "album" in release["uri"] and release["uri"].split(":")[-1] not in processed_ids:
+                        self.process_album(artist_key, release)
+                        processed_ids.append(release["id"])
+
+                    # Process tracks in singles
+                    if "track" in release["uri"] and release["uri"].split(":")[-1] not in processed_ids:
+                        self.process_track(artist_key, release)
+                        processed_ids.append(release["id"])
+
+        # Process top tracks
+        top_tracks = discography["topTracks"]
+        if len(top_tracks["items"]) > 0:
+            for top_track in top_tracks["items"]:
+                release = top_track["track"]
+                if "track" in release["uri"] and release["uri"].split(":")[-1] not in processed_ids:
+                    self.process_track(artist_key, release)
+                    processed_ids.append(release["id"])
+
+        
+        
+    
+        
+        
+
+        
+        
+    
+        
+        
+        
+        
+        
+        
+        
+
+
+
 
 
 
@@ -304,6 +434,17 @@ class UserClient():
             print(f"Error scraping artist {artist_key}: {error}")
 
         return False
+    
+    def init_lateral_channels(self):
+        self.artist_indexing_channel = self.connection.channel()
+        self.artist_indexing_channel.queue_declare('sp_artist_pathfinder_index')
+
+    def mq_publish_message(self, channel, queue, message):
+        # Publish a message to the specified channel and queue
+        channel.basic_publish(exchange='',
+                              routing_key=queue,
+                              body=message)
+        print(f" [x] Sent '{message}' to {queue}")
 
 
     def produce_client_token(self):
